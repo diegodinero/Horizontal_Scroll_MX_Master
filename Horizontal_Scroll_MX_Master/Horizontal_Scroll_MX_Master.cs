@@ -10,20 +10,21 @@ namespace Horizontal_Scroll_MX_Master
 {
     /// <summary>
     /// Intercepts the Logitech MX Master thumb wheel (horizontal scroll) and maps it to
-    /// Page Down (scroll right/forward) and Page Up (scroll left/backward) for the chart.
-    /// Uses a Windows low-level mouse hook (WH_MOUSE_LL) and SendInput to fire the keys.
+    /// Shift + vertical scroll, which is the combination Quantower uses to scroll charts
+    /// horizontally. Uses a Windows low-level mouse hook (WH_MOUSE_LL) and SendInput.
     /// Information about API: http://api.quantower.com
     /// </summary>
     public class Horizontal_Scroll_MX_Master : Indicator
     {
         // ── Windows constants ──────────────────────────────────────────────────────
-        private const int  WH_MOUSE_LL     = 14;
-        private const int  WM_MOUSEHWHEEL  = 0x020E;
-        private const int  WM_QUIT         = 0x0012;
-        private const uint INPUT_KEYBOARD  = 1;
-        private const uint KEYEVENTF_KEYUP = 0x0002;
-        private const ushort VK_PRIOR      = 0x21; // Page Up
-        private const ushort VK_NEXT       = 0x22; // Page Down
+        private const int    WH_MOUSE_LL       = 14;
+        private const int    WM_MOUSEHWHEEL    = 0x020E;
+        private const int    WM_QUIT           = 0x0012;
+        private const uint   INPUT_MOUSE       = 0;
+        private const uint   INPUT_KEYBOARD    = 1;
+        private const uint   MOUSEEVENTF_WHEEL = 0x0800;
+        private const uint   KEYEVENTF_KEYUP   = 0x0002;
+        private const ushort VK_SHIFT          = 0x10;
 
         // ── P/Invoke ───────────────────────────────────────────────────────────────
         private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -139,7 +140,7 @@ namespace Horizontal_Scroll_MX_Master
             : base()
         {
             Name        = "Horizontal_Scroll_MX_Master";
-            Description = "Maps the Logitech MX Master thumb wheel to Page Up / Page Down";
+            Description = "Maps the Logitech MX Master thumb wheel to Shift + vertical scroll (Quantower horizontal scroll)";
             SeparateWindow = false;
         }
 
@@ -226,8 +227,8 @@ namespace Horizontal_Scroll_MX_Master
         // ── Hook callback ──────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Called for every low-level mouse event. Filters WM_MOUSEHWHEEL and sends
-        /// the appropriate Page key.
+        /// Called for every low-level mouse event. Filters WM_MOUSEHWHEEL and synthesizes
+        /// Shift + vertical scroll, which Quantower interprets as horizontal chart scroll.
         /// </summary>
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
@@ -238,10 +239,8 @@ namespace Horizontal_Scroll_MX_Master
                 // HIWORD of mouseData is a signed wheel delta (positive = right/forward).
                 short delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
 
-                if (delta > 0)
-                    SendKey(VK_NEXT);  // scroll right → Page Down
-                else if (delta < 0)
-                    SendKey(VK_PRIOR); // scroll left  → Page Up
+                if (delta != 0)
+                    SendShiftScroll(delta);
             }
 
             return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
@@ -250,20 +249,26 @@ namespace Horizontal_Scroll_MX_Master
         // ── Helpers ────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Sends a single key-down + key-up pair via SendInput.
+        /// Synthesizes Shift-down + WM_MOUSEWHEEL(delta) + Shift-up in a single SendInput
+        /// call. Quantower maps this combination to horizontal chart scrolling.
         /// </summary>
-        private static void SendKey(ushort vk)
+        private static void SendShiftScroll(short delta)
         {
-            var inputs = new INPUT[2];
+            var inputs = new INPUT[3];
 
-            // key down
-            inputs[0].type        = INPUT_KEYBOARD;
-            inputs[0].union.ki.wVk = vk;
+            // Shift key down
+            inputs[0].type           = INPUT_KEYBOARD;
+            inputs[0].union.ki.wVk   = VK_SHIFT;
 
-            // key up
-            inputs[1].type            = INPUT_KEYBOARD;
-            inputs[1].union.ki.wVk    = vk;
-            inputs[1].union.ki.dwFlags = KEYEVENTF_KEYUP;
+            // Vertical mouse wheel with the horizontal delta
+            inputs[1].type                  = INPUT_MOUSE;
+            inputs[1].union.mi.dwFlags      = MOUSEEVENTF_WHEEL;
+            inputs[1].union.mi.mouseData    = (uint)(int)delta;
+
+            // Shift key up
+            inputs[2].type           = INPUT_KEYBOARD;
+            inputs[2].union.ki.wVk   = VK_SHIFT;
+            inputs[2].union.ki.dwFlags = KEYEVENTF_KEYUP;
 
             SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
         }
