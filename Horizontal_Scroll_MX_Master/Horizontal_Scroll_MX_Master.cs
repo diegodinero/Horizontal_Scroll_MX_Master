@@ -77,6 +77,17 @@ namespace Horizontal_Scroll_MX_Master
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        private struct MOUSEINPUT
+        {
+            public int    dx;
+            public int    dy;
+            public uint   mouseData;
+            public uint   dwFlags;
+            public uint   time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         private struct KEYBDINPUT
         {
             public ushort wVk;
@@ -86,11 +97,22 @@ namespace Horizontal_Scroll_MX_Master
             public IntPtr dwExtraInfo;
         }
 
+        // The Windows INPUT struct contains a union whose size is driven by MOUSEINPUT
+        // (the largest member). Using [LayoutKind.Explicit] here ensures the union is
+        // correctly sized so Marshal.SizeOf<INPUT>() matches the native sizeof(INPUT)
+        // that SendInput validates via its cbSize parameter.
+        [StructLayout(LayoutKind.Explicit)]
+        private struct INPUTUNION
+        {
+            [FieldOffset(0)] public MOUSEINPUT  mi;
+            [FieldOffset(0)] public KEYBDINPUT  ki;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct INPUT
         {
-            public uint type;
-            public KEYBDINPUT ki;
+            public uint      type;
+            public INPUTUNION union;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -235,13 +257,13 @@ namespace Horizontal_Scroll_MX_Master
             var inputs = new INPUT[2];
 
             // key down
-            inputs[0].type    = INPUT_KEYBOARD;
-            inputs[0].ki.wVk  = vk;
+            inputs[0].type        = INPUT_KEYBOARD;
+            inputs[0].union.ki.wVk = vk;
 
             // key up
-            inputs[1].type        = INPUT_KEYBOARD;
-            inputs[1].ki.wVk      = vk;
-            inputs[1].ki.dwFlags  = KEYEVENTF_KEYUP;
+            inputs[1].type            = INPUT_KEYBOARD;
+            inputs[1].union.ki.wVk    = vk;
+            inputs[1].union.ki.dwFlags = KEYEVENTF_KEYUP;
 
             SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
         }
