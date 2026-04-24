@@ -1,7 +1,7 @@
 // Copyright QUANTOWER LLC. © 2017-2023. All rights reserved.
 
 using System;
-using System.Drawing;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using TradingPlatform.BusinessLayer;
@@ -136,7 +136,7 @@ namespace Horizontal_Scroll_MX_Master
 
             // Wait until the hook is installed before returning.
             if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
-                Log("MX Master hook: timed out waiting for hook thread to start.", StrategyLoggingLevel.Error);
+                Trace.WriteLine("MX Master hook: timed out waiting for hook thread to start.");
         }
 
         protected override void OnUpdate(UpdateArgs args)
@@ -165,7 +165,7 @@ namespace Horizontal_Scroll_MX_Master
             if (_hookHandle == IntPtr.Zero)
             {
                 int err = Marshal.GetLastWin32Error();
-                Log($"MX Master hook: SetWindowsHookEx failed (Win32 error {err}).", StrategyLoggingLevel.Error);
+                Trace.WriteLine($"MX Master hook: SetWindowsHookEx failed (Win32 error {err}).");
                 return;
             }
 
@@ -193,7 +193,7 @@ namespace Horizontal_Scroll_MX_Master
 
             PostThreadMessage(_hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
             if (!_hookThread.Join(TimeSpan.FromSeconds(3)))
-                Log("MX Master hook: hook thread did not exit within the timeout.", StrategyLoggingLevel.Error);
+                Trace.WriteLine("MX Master hook: hook thread did not exit within the timeout.");
 
             _hookThread = null;
 
