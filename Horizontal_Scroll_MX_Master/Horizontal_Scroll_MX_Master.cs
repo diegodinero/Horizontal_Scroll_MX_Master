@@ -2,68 +2,238 @@
 
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Threading;
 using TradingPlatform.BusinessLayer;
 
 namespace Horizontal_Scroll_MX_Master
 {
     /// <summary>
-    /// An example of blank indicator. Add your code, compile it and use on the charts in the assigned trading terminal.
-    /// Information about API you can find here: http://api.quantower.com
-    /// Code samples: https://github.com/Quantower/Examples
+    /// Intercepts the Logitech MX Master thumb wheel (horizontal scroll) and maps it to
+    /// Page Down (scroll right/forward) and Page Up (scroll left/backward) for the chart.
+    /// Uses a Windows low-level mouse hook (WH_MOUSE_LL) and SendInput to fire the keys.
+    /// Information about API: http://api.quantower.com
     /// </summary>
-	public class Horizontal_Scroll_MX_Master : Indicator
+    public class Horizontal_Scroll_MX_Master : Indicator
     {
-        /// <summary>
-        /// Indicator's constructor. Contains general information: name, description, LineSeries etc. 
-        /// </summary>
+        // ── Windows constants ──────────────────────────────────────────────────────
+        private const int  WH_MOUSE_LL     = 14;
+        private const int  WM_MOUSEHWHEEL  = 0x020E;
+        private const int  WM_QUIT         = 0x0012;
+        private const uint INPUT_KEYBOARD  = 1;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const ushort VK_PRIOR      = 0x21; // Page Up
+        private const ushort VK_NEXT       = 0x22; // Page Down
+
+        // ── P/Invoke ───────────────────────────────────────────────────────────────
+        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn,
+                                                      IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode,
+                                                    IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PostThreadMessage(uint idThread, uint Msg,
+                                                     IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        private static extern uint SendInput(uint nInputs,
+                                             [MarshalAs(UnmanagedType.LPArray)] INPUT[] pInputs,
+                                             int cbSize);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetMessage(out MSG lpMsg, IntPtr hWnd,
+                                              uint wMsgFilterMin, uint wMsgFilterMax);
+
+        [DllImport("user32.dll")]
+        private static extern bool TranslateMessage([In] ref MSG lpMsg);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessage([In] ref MSG lpmsg);
+
+        // ── Structs ────────────────────────────────────────────────────────────────
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public int     pt_x;
+            public int     pt_y;
+            public uint    mouseData;   // HIWORD = wheel delta for WM_MOUSEHWHEEL
+            public uint    flags;
+            public uint    time;
+            public IntPtr  dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KEYBDINPUT
+        {
+            public ushort wVk;
+            public ushort wScan;
+            public uint   dwFlags;
+            public uint   time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct INPUT
+        {
+            public uint type;
+            public KEYBDINPUT ki;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG
+        {
+            public IntPtr hwnd;
+            public uint   message;
+            public IntPtr wParam;
+            public IntPtr lParam;
+            public uint   time;
+            public int    pt_x;
+            public int    pt_y;
+        }
+
+        // ── State ──────────────────────────────────────────────────────────────────
+        private Thread          _hookThread;
+        private uint            _hookThreadId;
+        private IntPtr          _hookHandle = IntPtr.Zero;
+        private LowLevelMouseProc _hookProc; // kept alive to prevent GC
+        private readonly ManualResetEventSlim _hookReady = new ManualResetEventSlim(false);
+
+        // ── Constructor ────────────────────────────────────────────────────────────
         public Horizontal_Scroll_MX_Master()
             : base()
         {
-            // Defines indicator's name and description.
-            Name = "Horizontal_Scroll_MX_Master";
-            Description = "My indicator's annotation";
-
-            // Defines line on demand with particular parameters.
-            AddLineSeries("line1", Color.CadetBlue, 1, LineStyle.Solid);
-
-            // By default indicator will be applied on main window of the chart
+            Name        = "Horizontal_Scroll_MX_Master";
+            Description = "Maps the Logitech MX Master thumb wheel to Page Up / Page Down";
             SeparateWindow = false;
         }
 
-        /// <summary>
-        /// This function will be called after creating an indicator as well as after its input params reset or chart (symbol or timeframe) updates.
-        /// </summary>
+        // ── Lifecycle ──────────────────────────────────────────────────────────────
         protected override void OnInit()
         {
-            // Add your initialization code here
+            // Start a dedicated STA thread that owns the hook and runs a message pump.
+            _hookProc  = HookCallback; // pin delegate in a field so GC won't collect it
+            _hookThread = new Thread(HookThreadProc)
+            {
+                IsBackground = true,
+                Name         = "MX_Master_HookThread"
+            };
+            _hookThread.SetApartmentState(ApartmentState.STA);
+            _hookThread.Start();
+
+            // Wait until the hook is installed before returning.
+            _hookReady.Wait(TimeSpan.FromSeconds(5));
+        }
+
+        protected override void OnUpdate(UpdateArgs args)
+        {
+            // No price calculations needed; this indicator only handles mouse input.
+        }
+
+        protected override void OnClear()
+        {
+            StopHookThread();
+        }
+
+        // ── Hook thread ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Runs on a dedicated thread: installs the hook, runs a message pump, then
+        /// cleans up when the pump is stopped.
+        /// </summary>
+        private void HookThreadProc()
+        {
+            _hookThreadId = GetCurrentThreadId();
+            _hookHandle   = SetWindowsHookEx(WH_MOUSE_LL, _hookProc, IntPtr.Zero, 0);
+
+            _hookReady.Set(); // signal OnInit that the hook is installed
+
+            if (_hookHandle == IntPtr.Zero)
+                return; // failed to install hook
+
+            // Message pump — required for WH_MOUSE_LL callbacks to fire.
+            while (GetMessage(out MSG msg, IntPtr.Zero, 0, 0))
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+
+            if (_hookHandle != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_hookHandle);
+                _hookHandle = IntPtr.Zero;
+            }
         }
 
         /// <summary>
-        /// Calculation entry point. This function is called when a price data updates. 
-        /// Will be runing under the HistoricalBar mode during history loading. 
-        /// Under NewTick during realtime. 
-        /// Under NewBar if start of the new bar is required.
+        /// Signals the hook thread to exit and waits for it.
         /// </summary>
-        /// <param name="args">Provides data of updating reason and incoming price.</param>
-        protected override void OnUpdate(UpdateArgs args)
+        private void StopHookThread()
         {
-            // Add your calculations here.         
+            if (_hookThread == null || !_hookThread.IsAlive)
+                return;
 
-            //
-            // An example of accessing the prices          
-            // ----------------------------
-            //
-            // double bid = Bid();                          // To get current Bid price
-            // double open = Open(5);                       // To get open price for the fifth bar before the current
-            // 
+            PostThreadMessage(_hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            _hookThread.Join(TimeSpan.FromSeconds(3));
+            _hookThread = null;
+        }
 
-            //
-            // An example of settings values for indicator's lines
-            // -----------------------------------------------
-            //            
-            // SetValue(1.43);                              // To set value for first line of the indicator
-            // SetValue(1.43, 1);                           // To set value for second line of the indicator
-            // SetValue(1.43, 1, 5);                        // To set value for fifth bar before the current for second line of the indicator
+        // ── Hook callback ──────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Called for every low-level mouse event. Filters WM_MOUSEHWHEEL and sends
+        /// the appropriate Page key.
+        /// </summary>
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && (int)wParam == WM_MOUSEHWHEEL)
+            {
+                var hookStruct = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+
+                // HIWORD of mouseData is a signed wheel delta (positive = right/forward).
+                short delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
+
+                if (delta > 0)
+                    SendKey(VK_NEXT);  // scroll right → Page Down
+                else if (delta < 0)
+                    SendKey(VK_PRIOR); // scroll left  → Page Up
+            }
+
+            return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
+        }
+
+        // ── Helpers ────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Sends a single key-down + key-up pair via SendInput.
+        /// </summary>
+        private static void SendKey(ushort vk)
+        {
+            var inputs = new INPUT[2];
+
+            // key down
+            inputs[0].type    = INPUT_KEYBOARD;
+            inputs[0].ki.wVk  = vk;
+
+            // key up
+            inputs[1].type        = INPUT_KEYBOARD;
+            inputs[1].ki.wVk      = vk;
+            inputs[1].ki.dwFlags  = KEYEVENTF_KEYUP;
+
+            SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
         }
     }
 }
