@@ -65,6 +65,12 @@ namespace Horizontal_Scroll_MX_Master
         [DllImport("user32.dll")]
         private static extern IntPtr DispatchMessage([In] ref MSG lpmsg);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
         // ── Structs ────────────────────────────────────────────────────────────────
         [StructLayout(LayoutKind.Sequential)]
         private struct MSLLHOOKSTRUCT
@@ -134,6 +140,7 @@ namespace Horizontal_Scroll_MX_Master
         private IntPtr            _hookHandle = IntPtr.Zero;
         private LowLevelMouseProc _hookProc;  // kept alive to prevent GC
         private ManualResetEventSlim _hookReady = new ManualResetEventSlim(false);
+        private uint              _currentProcessId;
 
         // ── Constructor ────────────────────────────────────────────────────────────
         public Horizontal_Scroll_MX_Master()
@@ -147,6 +154,9 @@ namespace Horizontal_Scroll_MX_Master
         // ── Lifecycle ──────────────────────────────────────────────────────────────
         protected override void OnInit()
         {
+            // Capture the Quantower process ID so the hook can restrict input to this app.
+            _currentProcessId = (uint)Process.GetCurrentProcess().Id;
+
             // Start a dedicated STA thread that owns the hook and runs a message pump.
             _hookProc  = HookCallback; // pin delegate in a field so GC won't collect it
             _hookThread = new Thread(HookThreadProc)
@@ -227,8 +237,10 @@ namespace Horizontal_Scroll_MX_Master
         // ── Hook callback ──────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Called for every low-level mouse event. Filters WM_MOUSEHWHEEL and synthesizes
-        /// Shift + vertical scroll, which Quantower interprets as horizontal chart scroll.
+        /// Called for every low-level mouse event. When a WM_MOUSEHWHEEL arrives and
+        /// Quantower is the foreground application, the event is consumed and replaced with
+        /// Shift + vertical scroll (Quantower's horizontal-scroll binding). When any other
+        /// application is in the foreground the event passes through unchanged.
         /// </summary>
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
@@ -239,11 +251,28 @@ namespace Horizontal_Scroll_MX_Master
                 // HIWORD of mouseData is a signed wheel delta (positive = right/forward).
                 short delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
 
-                if (delta != 0)
+                if (delta != 0 && IsOurProcessForeground())
+                {
                     SendShiftScroll(delta);
+                    return (IntPtr)1; // consume the original horizontal-scroll event
+                }
             }
 
             return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
+        }
+
+        /// <summary>
+        /// Returns true when the foreground window belongs to the same process as this
+        /// indicator (i.e. Quantower is the active application).
+        /// </summary>
+        private bool IsOurProcessForeground()
+        {
+            IntPtr fgWindow = GetForegroundWindow();
+            if (fgWindow == IntPtr.Zero)
+                return false;
+
+            GetWindowThreadProcessId(fgWindow, out uint fgPid);
+            return fgPid == _currentProcessId;
         }
 
         // ── Helpers ────────────────────────────────────────────────────────────────
