@@ -1,6 +1,7 @@
 // Copyright QUANTOWER LLC. © 2017-2023. All rights reserved.
 
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -12,6 +13,8 @@ namespace Horizontal_Scroll_MX_Master
     /// Intercepts the Logitech MX Master thumb wheel (horizontal scroll) and maps it to
     /// Shift + vertical scroll, which is the combination Quantower uses to scroll charts
     /// horizontally. Uses a Windows low-level mouse hook (WH_MOUSE_LL) and SendInput.
+    /// The hook callback only queues the delta and returns immediately; a dedicated sender
+    /// thread calls SendInput so the hook never risks exceeding Windows' callback timeout.
     /// Information about API: http://api.quantower.com
     /// </summary>
     public class Horizontal_Scroll_MX_Master : Indicator
@@ -142,6 +145,11 @@ namespace Horizontal_Scroll_MX_Master
         private ManualResetEventSlim _hookReady = new ManualResetEventSlim(false);
         private uint              _currentProcessId;
 
+        // Bounded queue: hook callback enqueues deltas without blocking; sender thread
+        // drains it and calls SendInput away from the hook's time-critical callback path.
+        private BlockingCollection<short> _deltaQueue;
+        private Thread                    _senderThread;
+
         // ── Constructor ────────────────────────────────────────────────────────────
         public Horizontal_Scroll_MX_Master()
             : base()
@@ -156,6 +164,15 @@ namespace Horizontal_Scroll_MX_Master
         {
             // Capture the Quantower process ID so the hook can restrict input to this app.
             _currentProcessId = (uint)Process.GetCurrentProcess().Id;
+
+            // Start the sender thread before the hook so the queue is ready immediately.
+            _deltaQueue   = new BlockingCollection<short>(64);
+            _senderThread = new Thread(SenderThreadProc)
+            {
+                IsBackground = true,
+                Name         = "MX_Master_SenderThread"
+            };
+            _senderThread.Start();
 
             // Start a dedicated STA thread that owns the hook and runs a message pump.
             _hookProc  = HookCallback; // pin delegate in a field so GC won't collect it
@@ -180,6 +197,7 @@ namespace Horizontal_Scroll_MX_Master
         protected override void OnClear()
         {
             StopHookThread();
+            StopSenderThread();
         }
 
         // ── Hook thread ────────────────────────────────────────────────────────────
@@ -234,6 +252,39 @@ namespace Horizontal_Scroll_MX_Master
             _hookReady = null;
         }
 
+        /// <summary>
+        /// Signals the sender thread to drain and exit, then waits for it.
+        /// </summary>
+        private void StopSenderThread()
+        {
+            _deltaQueue?.CompleteAdding();
+
+            if (_senderThread != null && !_senderThread.Join(TimeSpan.FromSeconds(3)))
+                Trace.WriteLine("MX Master hook: sender thread did not exit within the timeout.");
+
+            _senderThread = null;
+            _deltaQueue?.Dispose();
+            _deltaQueue = null;
+        }
+
+        // ── Sender thread ──────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Drains <see cref="_deltaQueue"/> and calls <see cref="SendShiftScroll"/> for
+        /// each delta. Running SendInput here — off the hook callback — ensures the hook
+        /// always returns well within Windows' low-level hook timeout (~300 ms), preventing
+        /// the system-wide scroll freeze caused by a timed-out hook.
+        /// </summary>
+        private void SenderThreadProc()
+        {
+            try
+            {
+                foreach (short delta in _deltaQueue.GetConsumingEnumerable())
+                    SendShiftScroll(delta);
+            }
+            catch (OperationCanceledException) { }
+        }
+
         // ── Hook callback ──────────────────────────────────────────────────────────
 
         /// <summary>
@@ -253,7 +304,11 @@ namespace Horizontal_Scroll_MX_Master
 
                 if (delta != 0 && IsOurProcessForeground())
                 {
-                    SendShiftScroll(delta);
+                    // Enqueue the delta and return immediately. SendInput is called on the
+                    // sender thread so this callback never risks exceeding the hook timeout.
+                    // TryAdd is non-blocking; if the queue is full the event is silently
+                    // dropped rather than stalling the hook.
+                    _deltaQueue.TryAdd(delta);
                     return (IntPtr)1; // consume the original horizontal-scroll event
                 }
             }
