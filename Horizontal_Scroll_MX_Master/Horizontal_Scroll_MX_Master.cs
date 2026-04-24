@@ -106,11 +106,11 @@ namespace Horizontal_Scroll_MX_Master
         }
 
         // ── State ──────────────────────────────────────────────────────────────────
-        private Thread          _hookThread;
-        private uint            _hookThreadId;
-        private IntPtr          _hookHandle = IntPtr.Zero;
-        private LowLevelMouseProc _hookProc; // kept alive to prevent GC
-        private readonly ManualResetEventSlim _hookReady = new ManualResetEventSlim(false);
+        private Thread            _hookThread;
+        private uint              _hookThreadId;
+        private IntPtr            _hookHandle = IntPtr.Zero;
+        private LowLevelMouseProc _hookProc;  // kept alive to prevent GC
+        private ManualResetEventSlim _hookReady = new ManualResetEventSlim(false);
 
         // ── Constructor ────────────────────────────────────────────────────────────
         public Horizontal_Scroll_MX_Master()
@@ -135,7 +135,8 @@ namespace Horizontal_Scroll_MX_Master
             _hookThread.Start();
 
             // Wait until the hook is installed before returning.
-            _hookReady.Wait(TimeSpan.FromSeconds(5));
+            if (!_hookReady.Wait(TimeSpan.FromSeconds(5)))
+                Log("MX Master hook: timed out waiting for hook thread to start.", StrategyLoggingLevel.Error);
         }
 
         protected override void OnUpdate(UpdateArgs args)
@@ -162,7 +163,11 @@ namespace Horizontal_Scroll_MX_Master
             _hookReady.Set(); // signal OnInit that the hook is installed
 
             if (_hookHandle == IntPtr.Zero)
-                return; // failed to install hook
+            {
+                int err = Marshal.GetLastWin32Error();
+                Log($"MX Master hook: SetWindowsHookEx failed (Win32 error {err}).", StrategyLoggingLevel.Error);
+                return;
+            }
 
             // Message pump — required for WH_MOUSE_LL callbacks to fire.
             while (GetMessage(out MSG msg, IntPtr.Zero, 0, 0))
@@ -187,8 +192,13 @@ namespace Horizontal_Scroll_MX_Master
                 return;
 
             PostThreadMessage(_hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
-            _hookThread.Join(TimeSpan.FromSeconds(3));
+            if (!_hookThread.Join(TimeSpan.FromSeconds(3)))
+                Log("MX Master hook: hook thread did not exit within the timeout.", StrategyLoggingLevel.Error);
+
             _hookThread = null;
+
+            _hookReady?.Dispose();
+            _hookReady = null;
         }
 
         // ── Hook callback ──────────────────────────────────────────────────────────
