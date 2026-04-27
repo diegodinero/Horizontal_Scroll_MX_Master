@@ -2,7 +2,10 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using TradingPlatform.BusinessLayer;
@@ -15,6 +18,8 @@ namespace Horizontal_Scroll_MX_Master
     /// horizontally. Uses a Windows low-level mouse hook (WH_MOUSE_LL) and SendInput.
     /// The hook callback only queues the delta and returns immediately; a dedicated sender
     /// thread calls SendInput so the hook never risks exceeding Windows' callback timeout.
+    /// Also renders anchored affirmation text, a subtitle, and a watermark (symbol + timeframe)
+    /// directly on the chart via OnPaintChart.
     /// Information about API: http://api.quantower.com
     /// </summary>
     public class Horizontal_Scroll_MX_Master : Indicator
@@ -150,12 +155,35 @@ namespace Horizontal_Scroll_MX_Master
         private BlockingCollection<short> _deltaQueue;
         private Thread                    _senderThread;
 
+        // ── Affirmations ───────────────────────────────────────────────────────────────
+
+        [InputParameter("Title Text")]
+        public string firstText = "Be Legendary";
+
+        public Font firstTextFont { get; private set; } = new Font("Trebuchet MS", 32);
+
+        [InputParameter("Title Font Color", 0)]
+        public Color firstTextColor = Color.Gold;
+
+        [InputParameter("Subtitle Text")]
+        public string secondText = "";
+
+        [InputParameter("Subtitle Font Color", 0)]
+        public Color secondTextColor = Color.MediumSlateBlue;
+
+        public Font secondTextFont { get; private set; } = new Font("Trebuchet MS", 12);
+
+        [InputParameter("Watermark Font Color", 0)]
+        public Color watermarkColor = Color.LightGray;
+
+        public Font watermarkFont { get; private set; } = new Font("Arial", 20);
+
         // ── Constructor ────────────────────────────────────────────────────────────
         public Horizontal_Scroll_MX_Master()
             : base()
         {
             Name        = "Horizontal_Scroll_MX_Master";
-            Description = "Maps the Logitech MX Master thumb wheel to Shift + vertical scroll (Quantower horizontal scroll)";
+            Description = "Maps the Logitech MX Master thumb wheel to Shift + vertical scroll (Quantower horizontal scroll). Displays anchored affirmation text, subtitle, and watermark on the chart.";
             SeparateWindow = false;
         }
 
@@ -192,6 +220,100 @@ namespace Horizontal_Scroll_MX_Master
         protected override void OnUpdate(UpdateArgs args)
         {
             // No price calculations needed; this indicator only handles mouse input.
+        }
+
+        public override void OnPaintChart(PaintChartEventArgs args)
+        {
+            Graphics gr = args.Graphics;
+
+            // Measure the size of the title and subtitle
+            SizeF titleSize    = gr.MeasureString(firstText, firstTextFont);
+            SizeF subtitleSize = gr.MeasureString(secondText, secondTextFont);
+
+            // Calculate X position to center the text horizontally
+            float centerX = (args.Rectangle.Width - Math.Max(titleSize.Width, subtitleSize.Width)) / 2;
+
+            // Set the title and subtitle Y positions
+            float titleY    = 10; // 10 pixels from the top
+            float subtitleY = titleY + titleSize.Height + 5; // 5 pixels below the title
+
+            // First text (Title)
+            using (Brush firstBrush = new SolidBrush(firstTextColor))
+            {
+                gr.DrawString(firstText, firstTextFont, firstBrush, centerX, titleY);
+            }
+
+            // Second text (Subtitle)
+            using (Brush secondBrush = new SolidBrush(secondTextColor))
+            {
+                gr.DrawString(secondText, secondTextFont, secondBrush, centerX, subtitleY);
+            }
+
+            // Watermark text
+            string symbolName    = (this.Symbol?.Name ?? "N/A") + "!";
+            string rawTimeFrame  = this.HistoricalData?.Aggregation.GetPeriod.ToString() ?? "N/A";
+            string timeFrame     = AbbreviateTimeFrame(rawTimeFrame);
+
+            // Remove all spaces from symbol and time frame
+            symbolName = symbolName.Replace(" ", "");
+            timeFrame  = timeFrame.Replace(" ", "");
+
+            // Add space before and after the "|" character
+            string symbolAndTimeFrame = $"{symbolName} | {timeFrame}";
+
+            string date = DateTime.Now.ToString("d/M/yyyy");
+
+            using (Brush watermarkBrush = new SolidBrush(watermarkColor))
+            {
+                // Draw date
+                SizeF dateSize = gr.MeasureString(date, watermarkFont);
+                float dateX    = (args.Rectangle.Width - dateSize.Width) / 2;
+                float dateY    = args.Rectangle.Height - dateSize.Height - 40; // 40 pixels from bottom
+                gr.DrawString(date, watermarkFont, watermarkBrush, dateX, dateY);
+
+                // Draw symbol and timeframe below date
+                SizeF symbolSize = gr.MeasureString(symbolAndTimeFrame, watermarkFont);
+                float symbolX    = (args.Rectangle.Width - symbolSize.Width) / 2;
+                float symbolY    = dateY + dateSize.Height + 5; // 5 pixels below date
+                gr.DrawString(symbolAndTimeFrame, watermarkFont, watermarkBrush, symbolX, symbolY);
+            }
+        }
+
+        private string AbbreviateTimeFrame(string rawTimeFrame)
+        {
+            if (rawTimeFrame.EndsWith("Second")) return rawTimeFrame.Replace(" Second", "S").Replace("-", "");
+            if (rawTimeFrame.EndsWith("Minute")) return rawTimeFrame.Replace(" Minute", "M").Replace("-", "");
+            if (rawTimeFrame.EndsWith("Hour"))   return rawTimeFrame.Replace(" Hour",   "H").Replace("-", "");
+            if (rawTimeFrame.EndsWith("Day"))    return rawTimeFrame.Replace(" Day",    "D").Replace("-", "");
+            if (rawTimeFrame.EndsWith("Week"))   return rawTimeFrame.Replace(" Week",   "W").Replace("-", "");
+            if (rawTimeFrame.EndsWith("Month"))  return rawTimeFrame.Replace(" Month",  "Mo").Replace("-", "");
+
+            return rawTimeFrame.Replace(" ", "");
+        }
+
+        public override IList<SettingItem> Settings
+        {
+            get
+            {
+                var settings = base.Settings;
+
+                var defaultSeparator = settings.FirstOrDefault()?.SeparatorGroup;
+
+                settings.Add(new SettingItemFont("Title Font",     firstTextFont,  2) { SeparatorGroup = defaultSeparator });
+                settings.Add(new SettingItemFont("Subtitle Font",  secondTextFont, 2) { SeparatorGroup = defaultSeparator });
+                settings.Add(new SettingItemFont("Watermark Font", watermarkFont,  2) { SeparatorGroup = defaultSeparator });
+
+                return settings;
+            }
+
+            set
+            {
+                base.Settings = value;
+
+                if (value.TryGetValue("Title Font",     out Font firstFontItem))    firstTextFont  = firstFontItem;
+                if (value.TryGetValue("Subtitle Font",  out Font secondFontItem))   secondTextFont = secondFontItem;
+                if (value.TryGetValue("Watermark Font", out Font watermarkFontItem)) watermarkFont = watermarkFontItem;
+            }
         }
 
         protected override void OnClear()

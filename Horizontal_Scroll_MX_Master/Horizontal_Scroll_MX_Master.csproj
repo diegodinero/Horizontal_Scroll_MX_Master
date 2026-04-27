@@ -16,6 +16,9 @@
     <OutputPath>C:\Users\LaDarrious\Desktop\Quantower\TradingPlatform\v1.146.6\..\..\Settings\Scripts\Indicators\Horizontal_Scroll_MX_Master</OutputPath>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="TradingPlatform.BusinessLayer">
       <HintPath>C:\Users\LaDarrious\Desktop\Quantower\TradingPlatform\v1.146.6\bin\TradingPlatform.BusinessLayer.dll</HintPath>
     </Reference>
